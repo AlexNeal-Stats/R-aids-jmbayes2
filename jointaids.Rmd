@@ -1,0 +1,186 @@
+---
+title: "jointaids"
+author: '230195947'
+date: "2026-09-11"
+output: pdf_document
+---
+
+```{r, setup, warning = FALSE}
+#install.packages(c("JMbayes2", "nlme", "survival", "GLMMadaptive", "survminer", "knitr", "gtsummary"))
+library(JMbayes2)
+library(nlme)
+library(survival)
+library(GLMMadaptive)
+library(survminer)
+library(tidyverse)
+library(knitr)
+library(gtsummary)
+```
+
+```{r}
+data(aids)
+data(aids.id)
+```
+
+```{r}
+km_fit2 <- survfit(Surv(Time, death) ~ drug, data = aids.id)
+
+km_fit2
+
+ggsurvplot(km_fit2, 
+           data = aids.id,
+           pval = TRUE,             # Adds the log-rank test p-value to the plot
+           risk.table = TRUE,       # Adds a table showing patients left over time
+           conf.int = TRUE,
+           legend.title = "Treatment",
+           legend.labs = c("ddC", "ddl"),
+           xlab = "Time in Days",
+           title = "Kaplan-Meier Survival Estimate for AIDS")
+```
+
+```{r}
+cox_aids <- coxph(Surv(Time, death) ~ drug + gender + CD4, data = aids.id)
+summary(cox_aids)
+```
+
+```{r}
+aids %>%
+  select(CD4) %>%
+  pivot_longer(everything()) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+  facet_wrap(~name, scales = "free") +
+  theme_minimal() +
+  labs(title = "Biomarker Distribution")
+```
+
+```{r}
+aids$CD4_sqr <- round((aids$CD4)**2)
+
+aids %>%
+  select(CD4_sqr) %>%
+  pivot_longer(everything()) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+  facet_wrap(~name, scales = "free") +
+  theme_minimal() +
+  labs(title = "Biomarker Distribution")
+```
+
+```{r}
+glmm_CD4 <- mixed_model(CD4_sqr ~ obstime + obstime:drug, 
+                        random = ~ obstime | patient, 
+                        data = aids,
+                        family = negative.binomial)
+summary(glmm_CD4)
+```
+
+```{r}
+cox_aids2 <- coxph(Surv(Time, death) ~ drug + gender, data = aids.id)
+
+summary(cox_aids2)
+```
+
+```{r}
+joint_fit2 <- jm(cox_aids2, glmm_CD4, time_var = "obstime", n_iter = 15000, n_burnin = 2500)
+
+summary(joint_fit2)
+```
+
+```{r}
+# 1. Randomly select exactly 4 patients to match the 2x2 grid layout
+set.seed(129) 
+random_patients <- sample(aids.id$patient, 4)
+
+# 2. Set up the graphics window for a 2x2 grid with adjusted margins
+par(mfrow = c(2, 2), mar = c(4, 4, 3, 1))
+
+# 3. Loop through the 4 patients and generate both longitudinal and survival panels
+for (pid in random_patients) {
+  
+  # Extract this specific patient's chart
+  pt_data <- aids[aids$patient == pid, ]
+  
+  # Forecast their CD4 count trajectory
+  pred_long <- predict(joint_fit2, newdata = pt_data, return_newdata = TRUE)
+  
+  # Forecast their survival/event risk
+  pred_event <- predict(joint_fit2, newdata = pt_data, process = "event", return_newdata = TRUE)
+  
+  # Plot the dual-panel output with explicit Patient ID titles
+  plot(pred_long, pred_event, 
+       main = paste("Patient ID:", pid),
+       xlim = c(0, 25))     
+}
+
+# 4. Reset the plotting window back to normal when finished
+par(mfrow = c(1, 1), mar = c(5, 4, 4, 2))
+```
+
+```{r}
+# Calculate the Time-Dependent ROC curve
+roc_quiz <- tvROC(joint_fit2, newdata = aids, Tstart = 6, Dt = 6, cores = 1)
+
+# Print the Area Under the Curve (AUC) score
+summary(roc_quiz)
+
+# Plot the ROC curve
+plot(roc_quiz)
+```
+
+```{r}
+tvAUC(joint_fit2, newdata = aids, Tstart = 6, Dt = 6, cores = 1)
+
+# Calculate the Brier Score to check prediction accuracy
+brier_quiz <- tvBrier(joint_fit2, newdata = aids, Tstart = 6, Dt = 6)
+
+# Print the result
+brier_quiz
+```
+
+```{r}
+set.seed(123)
+unique_ids <- unique(aids$patient)
+n_folds <- 5
+
+# Create a balanced, randomized vector of fold assignments (1 through 5)
+folds <- sample(rep(1:n_folds, length.out = length(unique_ids)))
+
+cv_auc <- numeric(n_folds)
+cv_brier <- numeric(n_folds)
+
+# 2. Run the actual refitting loop
+for (i in 1:n_folds) {
+  cat("Running Fold", i, "of", n_folds, "...\n")
+  
+  # Identify train and test IDs
+  test_ids <- unique_ids[folds == i]
+  train_ids <- unique_ids[folds != i]
+  
+  # Split longitudinal and survival datasets strictly by patient ID
+  train_data    <- aids[aids$patient %in% train_ids, ]
+  train_data.id <- aids.id[aids.id$patient %in% train_ids, ]
+  test_data     <- aids[aids$patient %in% test_ids, ]
+  
+  # Refit the strictly correct Negative Binomial using Gauss-Kronrod quadrature
+  nb_fit <- mixed_model(CD4_sqr ~ obstime + obstime:drug, 
+                        random = ~ obstime | patient, 
+                        data = train_data,
+                        family = negative.binomial)
+  
+  # Refit the survival submodel
+  cox_fit <- coxph(Surv(Time, death) ~ drug + gender, data = train_data.id)
+  
+  # Refit the joint model
+  fold_jm <- jm(cox_fit, nb_fit, time_var = "obstime", n_iter = 8000, n_burnin = 1300)
+  summary(fold_jm)
+  
+  # Test on the remaining 20% unseen data (cores = 1 to prevent socket crashes)
+  cv_auc[i]   <- tvAUC(fold_jm, newdata = test_data, Tstart = 6, Dt = 6, cores = 1)$auc
+  cv_brier[i] <- tvBrier(fold_jm, newdata = test_data, Tstart = 6, Dt = 6, cores = 1)$Brier
+}
+
+# 3. See the true, un-cheated cross-validation scores
+cat("\n5-Fold CV AUC:", mean(cv_auc, na.rm = TRUE), "\n")
+cat("5-Fold CV Brier:", mean(cv_brier, na.rm = TRUE), "\n")
+```
