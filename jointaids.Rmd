@@ -17,6 +17,7 @@ library(knitr)
 library(gtsummary)
 library(conflicted)
 library(flexsurv)
+library(broom)
 conflicted::conflicts_prefer(JMbayes2::coxph)
 conflicts_prefer(JMbayes2::mixed_model)
 ```
@@ -40,13 +41,6 @@ ggsurvplot(km_fit2,
            legend.labs = c("ddC", "ddl"),
            xlab = "Time in Days",
            title = "Kaplan-Meier Survival Estimate for AIDS")
-```
-
-```{r}
-weibull_ph <- flexsurvreg(Surv(Time, death) ~ drug + gender + CD4, 
-                          data = aids.id, 
-                          dist = "weibull")
-summary(weibull_ph)
 ```
 The CD4 columns in the JMbayes2 aids datasets refer to the square root of the raw CD4 counts, the purpose of this transformation is to fit an identity link Gaussian mixed effects model to these transformed counts.
 
@@ -88,7 +82,133 @@ Another issue with simply square-rooting the CD4 counts is that if this transfor
 In theory the Gaussian distribution is entirely mispecified to the square-root CD4 counts as the Gaussian distribution has a support of $(-\infty,\infty)$ which not only violates the range of the square-root function, but it also violates the fact that CD4 counts are restricted to positive values as they are a physical quantity. The fitted model will almost certainly assign a negligible predicted probability of a patient having a negative square-root CD4 count, however the non-zero espect implies that this distribution is simply incorrect.
 
 # Alternative Proposal
-There is another exponential family distribution that would've worked well here, however there is one glaring issue. The Gamma distribution has a support of $(0,\infty)$ meaning we lose the unrealistic assumption of negative CD4 counts
+There is another exponential family distribution that might have worked well for the square rooted counts, however there is one glaring issue. The Gamma distribution has a support of $(0,\infty)$ meaning we lose the unrealistic assumption of negative CD4 counts and we also have an additional dispersion parameter to account for any residual heteroskadicity. The main issue is that the gamma distribution is not defined at $0$ therefore the mass of counts at $0$ cannot be handled without introducing an artificial offset.
+
+This is a massive barrier and as such I will not attempt to use it, as it would require sensitivity analysis of the model to the offset introduced to see how robust the model actually is.
+
+# Survival model 
+
+We can infer which survival model would fit best to this data by first fitting a generalised gamma distribution to the survival times.
+$$
+\begin{align*}
+    \ln(T) &= \mu + \sigma w \\
+    w &= \frac{\ln(t) - \mu}{\sigma} \nonumber \\
+    f(t \mid \mu, \sigma, Q) &= \frac{|Q| (Q^{-2})^{Q^{-2}}}{\sigma t \, \Gamma(Q^{-2})} \exp\left[ Q^{-2} \left( Qw - \exp(Qw) \right) \right]
+\end{align*}
+$$
+
+If we set $Q=1$ then we get the following.
+$$
+\begin{align*}
+f(t \mid \mu, \sigma, 1) &= \frac{|1| (1^{-2})^{1^{-2}}}{\sigma t \, \Gamma(1^{-2})} \exp\left[ 1^{-2} \left( 1w - \exp(1w) \right) \right] \\
+f(t \mid \mu, \sigma) &= \frac{1}{\sigma t} \exp\left[w - \exp(w)  \right] \\
+\end{align*}
+$$
+Using the definition of $w$ we get,
+
+$$
+\frac{dw}{dt}=\frac{d}{dt}\left(\frac{\ln(t) - \mu}{\sigma}\right)=\frac{1}{\sigma t}
+$$
+We can get the pdf of $w$ by using the following identity,
+
+$$
+f_T(t)=\left |\frac{dw}{dt}\right|f_W(w) = \frac{1}{\sigma t} f_W(w)
+$$
+Therefore,
+$$
+\begin{align}
+f_W(w)&=\exp\left[w - \exp(w)\right]\\
+\implies w &\sim \text{Min-EV-Gumbel}(0,1)
+\end{align}
+$$
+We want to get from the minimum extreme value Gumbel distribution to the Weibull, we can do this via the following.
+
+
+$$
+e^w=\exp\left(\frac{\ln(t) - \mu}{\sigma}\right)=\left(e^{\ln t-\mu}\right)^{1/\sigma} =t^{1/\sigma}e^{-\mu/\sigma}.
+$$
+Therefore, 
+
+$$
+f_T(t) = \frac{1}{\sigma t} t^{1/\sigma}e^{-\mu/\sigma} e^{-t^{1/\sigma}e^{-\mu/\sigma}}
+$$
+Now we set $k=1/\sigma$ and $\lambda=e^\mu$,
+$$
+\begin{align}
+f_T(t) &= k\frac{1}{t} t^{k}(e^{-\mu})^k e^{-t^k(e^{-\mu})^k} \\
+&=kt^{k-1}\lambda^{-k}e^{-t^k\lambda^{-k}}\\
+&=kt^{k-1}\frac{1}{\lambda\lambda^{k-1}}e^{-(t/\lambda)^k} \\
+&=\frac{k}{\lambda}\left(\frac{t}{\lambda}\right)^{k-1}e^{-(t/\lambda)^k} \\
+\implies T &\sim \text{Weibull}(k,\lambda)\equiv\text{Weibull}(1/\sigma,e^\mu)
+\end{align}
+$$
+If we now set $k=1 \implies 1/\sigma=1 \implies \sigma=1$ then we have the following.
+
+$$
+\begin{align}
+f_T(t)&=\frac{1}{\lambda}e^{-\frac{t}{\lambda}} \\
+\implies T&\sim\text{Exp}(1/\lambda)
+\end{align}
+$$
+Therefore $Q=\sigma=1 \implies T\sim\text{Exp}(1/\lambda)$
+
+Now we can examine what happens when $Q\to0$. First I manipulate $f_T(t)$ to evaluate the limit easier.
+$$\begin{align}
+f_T(t) &= \frac{|Q| (Q^{-2})^{Q^{-2}}}{\sigma t \, \Gamma(Q^{-2})} \exp\left[ \frac{ Qw - \exp(Qw)}{Q^2} \right]\\
+&= \frac{|Q| (Q^{-2})^{Q^{-2}}}{\sigma t \, \Gamma(Q^{-2})} \exp\left[ \frac{ -1+1+Qw - \exp(Qw)}{Q^2} \right] \\
+&= \frac{|Q| (Q^{-2})^{Q^{-2}}}{\sigma t \, \Gamma(Q^{-2})}e^{-1/Q^2} \exp\left[ \frac{1+Qw - \exp(Qw)}{Q^2} \right] \\
+&= \frac{|Q| (Q^{-2})^{Q^{-2}}}{\sigma t \, \Gamma(Q^{-2})e^{Q^{-2}}} \exp\left[ \frac{1+Qw - \exp(Qw)}{Q^2} \right] \\
+&= C(Q)e^{A(Q)}
+\end{align}
+$$
+Now we take $\lim_{Q\to0}f_T(t)$, to find this limit we need to find $\lim_{Q\to0}C(Q)$ and $\lim_{Q\to0}A(Q)$.
+
+## $\lim_{Q\to0}C(Q)$:
+Let $k=Q^{-2}$ therefore $C(k)=\frac{k^k\left|1/\sqrt{k}\right|}{\sigma t \Gamma(k)e^k}=\frac{k^{k-1/2}}{\sigma t\Gamma(k)e^k}$
+
+We know that as $Q\to0$, $k=1/Q^2\to\infty$. Stirling's approximation is an asymptotic relationship for large values of the gamma function, since $k\to\infty$ it becomes an equivalence.
+
+Stirling's approximation tells us that,
+$$
+\lim_{k\to\infty}\Gamma(k)=\lim_{k\to\infty}\sqrt{\frac{2\pi}{k}}\left(\frac{k}{e}\right)^k = \lim_{k\to\infty}\sqrt{2\pi}k^{k-1/2}e^{-k}
+$$
+
+We can now plug this in to demonstrate the following,
+
+$$
+\lim_{Q\to0}C(Q)=\lim_{k\to\infty}C(k)=\lim_{k\to\infty}\frac{k^{k-1/2}}{\sigma t\Gamma(k)e^k}=\lim_{k\to\infty}\frac{k^{k-1/2}}{\sigma t\sqrt{2\pi}k^{k-1/2}e^{-k}e^k}=\lim_{k\to\infty}\frac{1}{\sigma t\sqrt{2\pi}}=\frac{1}{\sigma t\sqrt{2\pi}}
+$$
+## $\lim_{Q\to0}A(Q)$:
+By substituting $Q=0$ into $A(Q)$ we get the following $\frac{1+0w - \exp(0w)}{0^2}=\frac{0}{0}$ which is an indeterminate form therefore we can use L'H\^opitals rule to evaluate the limit.
+
+$$
+\lim_{Q\to0}A(Q) = \lim_{Q\to0}\left(\frac{\frac{d}{dQ}\left(1+Qw - e^{Qw}\right)}{\frac{d}{dQ}(Q^2)}\right)=\lim_{Q\to0}\left(\frac{w-we^{Qw}}{2Q}\right)=\frac{0}{0}
+$$
+This again is in an indeterminate form therefore we apply L'H\^opitals rule again to get the following,
+
+$$
+\lim_{Q\to0}A(Q) = \lim_{Q\to0}\left(\frac{\frac{d}{dQ}\left(w-we^{Qw}\right)}{\frac{d}{dQ}(2Q)}\right)=\lim_{Q\to0}\left(\frac{-w^2e^{Qw}}{2}\right)=-w^2/2
+$$
+We have that $\lim_{Q\to0}C(Q)$ and $\lim_{Q\to0}A(Q)$ exist therefore,
+
+$$
+\begin{align}
+\lim_{Q\to0}f_T(t)&=\lim_{Q\to0}C(Q)e^{A(Q)}\\
+&=\left[\lim_{Q\to0}C(Q)\right]e^{[\lim_{Q\to0}A(Q)]}\\
+&=\frac{1}{\sigma t\sqrt{2\pi}}e^{-w^2/2}=\left |\frac{dw}{dt}\right|f_W(w) = \frac{1}{\sigma t} f_W(w)
+\end{align}
+$$
+This means that  we have that $f_W(w)=\frac{1}{\sqrt{2\pi}}e^{-w^2/2}\implies w\sim N(0,1)$ therefore from $\ln(T) = \mu + \sigma w$ we can see that $\ln(T)\sim N(\mu,\sigma^2)$ meaning that $T\sim \text{Log-Normal}(\mu,\sigma^2)$
+
+There is one more model nested within the generalised-gamma framework, when we choose $Q=\sigma$ we get the following decomposition
+
+
+```{r}
+generalised_gamma_ph <- flexsurvreg(Surv(Time, death) ~ drug + gender + CD4, 
+                          data = aids.id, 
+                          dist = "gengamma")
+tidy(generalised_gamma_ph)
+```
 
 ```{r}
 aids %>%
@@ -139,7 +259,7 @@ summary(cox_aids2)
 ```
 
 ```{r}
-joint_fit2 <- jm(cox_aids2, glmm_CD4, time_var = "obstime", n_iter = 15000, n_burnin = 2500)
+joint_fit2 <- jm(cox_aids2, negbinom_CD4, time_var = "obstime", n_iter = 15000, n_burnin = 2500)
 
 summary(joint_fit2)
 ```
