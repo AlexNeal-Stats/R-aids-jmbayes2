@@ -1,0 +1,284 @@
+---
+title: "fin"
+author: "me"
+date: "2026-10-01"
+output: pdf_document
+---
+
+```{r}
+# =====================================================================
+# THE FULL HTA 8-MODEL COMPARISON PIPELINE
+# =====================================================================
+library(survHE)
+library(survival)
+library(dplyr)
+library(ggplot2)
+
+# 1. Load and prep data
+data(lung)
+df <- lung %>% 
+  filter(!is.na(time) & !is.na(status)) %>%
+  mutate(event = status - 1)
+
+# 2. Define the full epic suite of distributions
+models_to_fit <- c("exponential","gompertz","weibull","loglogistic","lognormal")
+
+cat("\n[1/3] Compiling 8 Stan Models. Go make lunch...\n")
+# 3. Fit all models via HMC
+fit_all <- fit.models(
+  formula = Surv(time, event) ~ 1, 
+  data = df, 
+  distr = models_to_fit, 
+  method = "hmc"
+)
+
+cat("\n[2/3] Extracting Internal KM data & Extrapolating...\n")
+# 4. Extract the empirical KM curve directly from survHE's misc slot
+km_fit <- fit_all$misc$km
+km_data <- data.frame(
+  Time = km_fit$time,
+  Survival = km_fit$surv
+)
+
+# 5. Iteratively extract and store the extrapolation for each model
+time_horizon <- 1:1800
+plot_data_list <- list()
+
+for(i in 1:length(models_to_fit)) {
+  # Extract individual model carefully to bypass survHE vectorization bugs
+  extrap <- make.surv(fit_all, mod = i, t = time_horizon)
+  S_curve <- extrap$mat[[1]][[2]] 
+  
+  # Store in a dataframe for ggplot
+  plot_data_list[[i]] <- data.frame(
+    Time = time_horizon,
+    Survival = S_curve,
+    Model = models_to_fit[i]
+  )
+}
+
+# Bind all the individual model dataframes into one massive dataframe
+all_parametric_data <- do.call(rbind, plot_data_list)
+
+cat("\n[3/3] Rendering Facet Grid Plot...\n")
+# =====================================================================
+# 6. PLOT: FACET GRID OVERLAY
+# =====================================================================
+ggplot() +
+  # The observed Kaplan-Meier step function (plotted in every panel)
+  geom_step(data = km_data, aes(x = Time, y = Survival), 
+            color = "blue", linewidth = 0.8, alpha = 0.6) +
+  
+  # The parametric extrapolation curves
+  geom_line(data = all_parametric_data, aes(x = Time, y = Survival), 
+            color = "red", linewidth = 1.2) +
+            
+  # Split the plot into 8 individual panels based on the Model name
+  facet_wrap(~ Model, ncol = 4) +
+  
+  labs(title = "Parametric Survival Models vs. Observed Kaplan-Meier",
+       subtitle = "Blue = Observed Clinical Trial Data | Red = Bayesian Parametric Fit (HMC)",
+       x = "Time (Days)", 
+       y = "Survival Probability") +
+  theme_minimal() +
+  coord_cartesian(xlim = c(0, 1800), ylim = c(0, 1)) +
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        strip.background = element_rect(fill = "gray90", color = NA))
+```
+
+```{r}
+cat("\n[1/4] Calculating 8-Model Predictive Weights...\n")
+# 1. Extract DIC and calculate weights
+criteria <- fit_all$model.fitting$dic
+delta_crit <- criteria - min(criteria)
+raw_weights <- exp(-0.5 * delta_crit)
+bma_weights <- raw_weights / sum(raw_weights)
+
+# Print the weights so you know what is driving the BMA line
+names(bma_weights) <- fit_all$misc$model_name
+print(round(bma_weights, 4))
+
+cat("\n[2/4] Extracting curves and calculating the universal BMA...\n")
+# 2. Setup extraction variables
+time_horizon <- 1:1800
+plot_data_list <- list()
+
+# Create an empty matrix to hold all 8 curves for the BMA calculation
+matrix_of_curves <- matrix(nrow = length(time_horizon), ncol = length(bma_weights))
+
+for(i in 1:length(bma_weights)) {
+  # Extract individual curve safely
+  extrap <- make.surv(fit_all, mod = i, t = time_horizon)
+  S_curve <- extrap$mat[[1]][[2]] 
+  
+  # Store in the matrix for BMA math
+  matrix_of_curves[, i] <- S_curve
+  
+  # Store in the list for faceted plotting
+  plot_data_list[[i]] <- data.frame(
+    Time = time_horizon,
+    Survival = S_curve,
+    Model = fit_all$misc$model_name[i]
+  )
+}
+
+# Bind the individual models into one dataframe (This HAS the 'Model' column)
+all_parametric_data <- do.call(rbind, plot_data_list)
+
+# 3. Calculate the BMA curve (Weighted Sum of all 8 columns)
+S_BMA <- rep(0, length(time_horizon))
+for(i in 1:length(bma_weights)) {
+  S_BMA <- S_BMA + (bma_weights[i] * matrix_of_curves[, i])
+}
+
+cat("\n[3/4] Preparing Broadcast Data (KM & BMA)...\n")
+# 4. Create the Broadcast Dataframes (These DO NOT have the 'Model' column)
+km_fit <- fit_all$misc$km
+km_data <- data.frame(
+  Time = km_fit$time,
+  Survival = km_fit$surv
+)
+
+bma_data <- data.frame(
+  Time = time_horizon,
+  Survival = S_BMA
+)
+
+cat("\n[4/4] Rendering the final HTA grid...\n")
+# =====================================================================
+# 5. PLOT: FACET GRID WITH BMA & KM OVERLAYS
+# =====================================================================
+ggplot() +
+  # Layer 1: Observed KM (Broadcast to all panels)
+  geom_step(data = km_data, aes(x = Time, y = Survival, color = "1. Observed KM"), 
+            linewidth = 0.8, alpha = 0.5) +
+  
+  # Layer 2: Individual Parametric Fits (Faceted by Model)
+  geom_line(data = all_parametric_data, aes(x = Time, y = Survival, color = "2. Individual Fit"), 
+            linewidth = 1.2, alpha = 0.8) +
+            
+  # Layer 3: The BMA Stacked Line (Broadcast to all panels)
+  geom_line(data = bma_data, aes(x = Time, y = Survival, color = "3. BMA Stacked Average"), 
+            linewidth = 1, linetype = "dashed") +
+            
+  facet_wrap(~ Model, ncol = 4) +
+  
+  scale_color_manual(
+    name = "Curve Legend",
+    values = c("1. Observed KM" = "blue", 
+               "2. Individual Fit" = "red", 
+               "3. BMA Stacked Average" = "black")
+  ) +
+  
+  labs(title = "Bayesian Structural Averaging: Individual Models vs BMA",
+       subtitle = "Black dashed line (BMA) and Blue step (KM) remain constant across all panels.",
+       x = "Time (Days)", 
+       y = "Survival Probability") +
+  theme_minimal() +
+  coord_cartesian(xlim = c(0, 1800), ylim = c(0, 1)) +
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        strip.background = element_rect(fill = "gray90", color = NA),
+        legend.position = "bottom")
+```
+
+```{r}
+# =====================================================================
+# THE TRUE BMA FACET MASTERPIECE (Marginal Likelihoods)
+# =====================================================================
+library(survHE)
+library(survival)
+library(dplyr)
+library(ggplot2)
+library(bridgesampling)
+
+# (Run this AFTER you have successfully compiled fit_all)
+
+cat("\n[1/4] Extracting Stan objects and computing Marginal Likelihoods...\n")
+cat("      (This integrates over the entire posterior. It will take time.)\n")
+
+# Extract the raw rstan fits dynamically
+stan_models <- fit_all$models
+model_names <- fit_all$misc$model_name
+
+# Calculate the Marginal Likelihood for each model
+ml_list <- lapply(stan_models, function(x) bridge_sampler(x, silent = TRUE))
+
+cat("\n[2/4] Calculating True BMA Weights (Bypassing post_prob)...\n")
+# 1. Extract the raw Log Marginal Likelihoods from each bridge object
+logml_scores <- sapply(ml_list, function(x) x$logml)
+
+# 2. Apply Bayes' Theorem (using the log-sum-exp trick to prevent computer underflow)
+delta_logml <- logml_scores - max(logml_scores)
+raw_weights <- exp(delta_logml)
+true_bma_weights <- raw_weights / sum(raw_weights)
+
+# 3. Attach the model names to the final vector
+names(true_bma_weights) <- model_names
+
+cat("\n--- True BMA Weights (Marginal Likelihood) ---\n")
+print(round(true_bma_weights, 4))
+
+cat("\n[3/4] Building the True BMA Extrapolation...\n")
+time_horizon <- 1:1800
+plot_data_list <- list()
+matrix_of_curves <- matrix(nrow = length(time_horizon), ncol = length(model_names))
+
+for(i in 1:length(model_names)) {
+  # Extract individual curves
+  extrap <- make.surv(fit_all, mod = i, t = time_horizon)
+  S_curve <- extrap$mat[[1]][[2]] 
+  
+  matrix_of_curves[, i] <- S_curve
+  
+  plot_data_list[[i]] <- data.frame(
+    Time = time_horizon,
+    Survival = S_curve,
+    Model = model_names[i]
+  )
+}
+
+all_parametric_data <- do.call(rbind, plot_data_list)
+
+# The True BMA Matrix Multiplication
+S_BMA <- rep(0, length(time_horizon))
+for(i in 1:length(true_bma_weights)) {
+  S_BMA <- S_BMA + (true_bma_weights[i] * matrix_of_curves[, i])
+}
+
+cat("\n[4/4] Rendering the True BMA Grid...\n")
+# Setup broadcast layers
+km_fit <- fit_all$misc$km
+km_data <- data.frame(Time = km_fit$time, Survival = km_fit$surv)
+bma_data <- data.frame(Time = time_horizon, Survival = S_BMA)
+
+# =====================================================================
+# PLOT: TRUE BMA FACET GRID
+# =====================================================================
+ggplot() +
+  geom_step(data = km_data, aes(x = Time, y = Survival, color = "1. Observed KM"), 
+            linewidth = 0.8, alpha = 0.5) +
+            
+  geom_line(data = all_parametric_data, aes(x = Time, y = Survival, color = "2. Individual Fit"), 
+            linewidth = 1.2, alpha = 0.8) +
+            
+  geom_line(data = bma_data, aes(x = Time, y = Survival, color = "3. True BMA Line"), 
+            linewidth = 1, linetype = "dashed") +
+            
+  facet_wrap(~ Model, ncol = 3) +
+  
+  scale_color_manual(
+    name = "Curve Legend",
+    values = c("1. Observed KM" = "blue", 
+               "2. Individual Fit" = "red", 
+               "3. True BMA Line" = "black")
+  ) +
+  
+  labs(title = "True Bayesian Model Averaging (M-closed Paradigm)",
+       subtitle = "Black dashed line (True BMA) applies Bayes' Theorem via Marginal Likelihoods.",
+       x = "Time (Days)", y = "Survival Probability") +
+  theme_minimal() +
+  coord_cartesian(xlim = c(0, 1800), ylim = c(0, 1)) +
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        strip.background = element_rect(fill = "gray90", color = NA),
+        legend.position = "bottom")
+```

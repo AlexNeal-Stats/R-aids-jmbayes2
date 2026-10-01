@@ -18,8 +18,9 @@ library(gtsummary)
 library(conflicted)
 library(flexsurv)
 library(broom)
-conflicted::conflicts_prefer(JMbayes2::coxph)
+conflicts_prefer(JMbayes2::coxph)
 conflicts_prefer(JMbayes2::mixed_model)
+conflicts_prefer(dplyr::filter)
 ```
 
 ```{r}
@@ -28,11 +29,11 @@ data(aids.id)
 ```
 
 ```{r}
-km_fit2 <- survfit(Surv(Time, death) ~ drug, data = aids.id)
+km_fit <- survfit(Surv(Time, death) ~ drug, data = aids.id)
 
-km_fit2
+km_fit
 
-ggsurvplot(km_fit2, 
+ggsurvplot(km_fit, 
            data = aids.id,
            pval = TRUE,             # Adds the log-rank test p-value to the plot
            risk.table = TRUE,       # Adds a table showing patients left over time
@@ -233,11 +234,135 @@ tidy(generalised_gamma_ph, conf.int = TRUE, conf.level = 0.95)
 ```
 
 By fitting a Generalised Gamma distribution we can observe the confidence intervals to infer which survival distribution fits best to the data.
-Observing the 95\% confidence intervals we fail to reject $H_0:Q=1\implies T\sim\text{Weibull}(1/\sigma,e^\mu)$ we also fail to reject (only just) $H_0:\sigma=1 \text{ & }Q=1\implies T\sim\text{Exp}(e^{-\mu})$.
+Observing the 95\% confidence intervals we fail to reject $H_0:Q=1\implies T\sim\text{Weibull}(1/\sigma,e^\mu)$ we also fail to reject (by a very small margin (95\% centile for $Q$ is 1.031(3d.p.))) $H_0:\sigma=1 \text{ & }Q=1\implies T\sim\text{Exp}(e^{-\mu})$.
+
+Since the exponential distribution is a sub-model of the Weibull distribution we can fit a Weibull survival model and check if the exponential model is supported, I do this because the evidence provided by the Generalised-Gamma distribution survival model is very low and the model may be too over-parametrised to tell. 
+
+```{r}
+weibull_ph <- flexsurvreg(Surv(Time, death) ~ drug + gender + CD4, 
+                          data = aids.id, 
+                          dist = "weibull")
+tidy(weibull_ph, conf.int = TRUE, conf.level = 0.95)
+```
+
+Based on this output $H_0: \text{shape}=1\implies T\sim\text{Exp}(1/\text{scale})$ is rejected as the confidence interval of the shape parameter is $(1.273,1.647)(3\text{d.p.})\notin1$.
 
 The data does seem to align with $Q=\sigma$ quite heavily as the values are highly similar $0.775$(3d.p.) vs $0.777$(3d.p.) with the confidence intervals overlapping a lot, therefore we fail to reject $H_0:Q=\sigma \implies T\sim\text{Gamma}(\sigma^{-2},\sigma^2e^\mu)$.
 
-We reject $H_0:Q=0$ as the 95\% c.e. for $Q$ is $(0.267,1.287)(3\text{d.p.})$ with predicted value $0.777(3\text{d.p.})$ which demonstrates that.
+We reject $H_0:Q=0 \implies T\sim\text{Log-Normal}(\mu,\sigma^2)$ as the 95\% c.e. for $Q$ is $(0.267,1.287)(3\text{d.p.})$ with predicted value $0.777(3\text{d.p.})$.
+
+There is another distribution which actually contains both the Generalised Gamma and the Log-Logistic as sub-models. This distribution is the Generalised-F distribution. The issue with this distribution is that it contains four parameters with two shape parameters.
+$$
+\begin{equation}
+f_T(t \mid \mu, \sigma, Q, P) = \frac{\delta}{\sigma t \, B(s_1, s_2)} \left( \frac{s_1}{s_2} \right)^{s_1} \frac{\exp(s_1 \delta w)}{\left( 1 + \frac{s_1}{s_2} \exp(\delta w) \right)^{s_1 + s_2}}
+\end{equation}
+$$
+where $B(s_1, s_2)$ is the Beta function, $Q$ is the skewness shape parameter, and $P > 0$ is the tail-weight shape parameter. The auxiliary terms $s_1$, $s_2$, and $\delta$ are deterministic functions of $Q$ and $P$, defined as:
+$$
+\begin{align}
+\delta &= (Q^2 + 2P)^{-1/2} \\[6pt]
+s_1 &= \frac{2\delta^2}{1 + Q\delta} \\
+s_2 &= \frac{2\delta^2}{1 - Q\delta}
+\end{align}
+$$
+Compared to the Generalised-Gamma distribution these parameters are clearly highly non-linear, it has both shape parameters $(Q,P)$ in a reciprocated square-rooted polynomial term w.r.t both parameters in $\delta$, this is then then placed in a quotient of quadratics w.r.t $\delta$ in $s_1$, and $s_2$. In the final distribution formulation ($f_T(t)$) $s_1$ and $s_2$ are then placed within a Beta function, exponentiated and quotiented with one another.
+
+We know that $P\to0\implies T\sim \text{Generalised-Gamma}(\mu,\sigma,Q)$ and $P\to1$ \& $Q\to0\implies T\sim\text{Log-Logistic}(\mu,\sigma)$
+
+This distribution can clearly only be fitted to data that has a very large number of observations as it has a highly irregular likelihood surface, I can basically guarantee that the fitted standard errors for the two shape parameters will blow up. I fit it anyway just to look at the confidence interval of the $P$ parameter to see if the Log-Logistic model can be ruled out. 
+
+```{r}
+generalised_F_ph <- flexsurvreg(Surv(Time, death) ~ drug + gender + CD4, 
+                          data = aids.id, 
+                          dist = "genf")
+tidy(generalised_F_ph, conf.int = TRUE, conf.level = 0.95)
+```
+
+Therefore we select the Weibull and Gamma and we also fail to rule out the Log-Logistic, we also choose the Generalised-Gamma as a possible selection as there is no suggestion that it underperforms or fits poorly.
+
+We plot all of these and compare to the ones that "failed" to see how they underperform compared to the Kaplan-Meier plot.
+
+```{r, fig.width=10, fig.height=7}
+# 1. Define the flexsurv distributions and their display names for the plot
+dist_map <- c(
+  "weibull"  = "Weibull",
+  "gamma"    = "Gamma",
+  "llogis"   = "Log-Logistic",
+  "gengamma" = "Gen. Gamma",
+  "exp"      = "Exponential (Rejected)",
+  "lnorm"    = "Log-Normal (Rejected)",
+  "genf"     = "Gen. F (Over-Parametrised)"
+)
+
+# Initialize an empty list to store predictions during the loop
+pred_list <- list()
+
+# 2. Loop through each distribution to fit the model and extract predictions
+suppressMessages({
+  for (d in names(dist_map)) {
+    model_name <- dist_map[[d]]
+    
+    # Fit the flexsurvreg model
+    fit <- flexsurvreg(Surv(Time, death) ~ drug, data = aids.id, dist = d)
+    
+    # Predict for Treatment: ddC
+    pred_ddC <- summary(fit, newdata = data.frame(drug = "ddC"), type = "survival", tidy = TRUE) %>% 
+      mutate(Model = model_name, drug = "ddC")
+    
+    # Predict for Treatment: ddI
+    pred_ddI <- summary(fit, newdata = data.frame(drug = "ddI"), type = "survival", tidy = TRUE) %>% 
+      mutate(Model = model_name, drug = "ddI")
+    
+    # Combine and save to our list
+    pred_list[[d]] <- bind_rows(pred_ddC, pred_ddI)
+  }
+})
+
+# 3. Collapse the list into a single dataframe
+param_surv <- bind_rows(pred_list)
+
+# 4. Fit the Kaplan-Meier baseline and clean the strata column
+km_fit <- survfit(Surv(Time, death) ~ drug, data = aids.id)
+
+km_tidy <- tidy(km_fit) %>% 
+  mutate(drug = gsub("drug=", "", strata)) 
+
+# 5. Plot everything using facet_wrap by Model
+ggplot() +
+  # Kaplan-Meier step function (Solid lines, drawn on every facet)
+  geom_step(data = km_tidy, aes(x = time, y = estimate, color = drug, linetype = "Kaplan-Meier"), linewidth = 1) +
+  
+  # Parametric curves (Dashed lines, split by their specific facet)
+  geom_line(data = param_surv, aes(x = time, y = est, color = drug, linetype = "Parametric Fit"), linewidth = 1) +
+  
+  # Create a separate panel for each distribution
+  facet_wrap(~ Model, ncol = 3) +
+  
+  # Styling
+  theme_bw() +
+  labs(
+    title = "Evaluating Parametric Fits against Kaplan-Meier Baseline",
+    subtitle = "Comparing predicted vs empirical survival for ddC and ddI treatment arms",
+    x = "Time in Days",
+    y = "Survival Probability",
+    color = "Treatment Arm",
+    linetype = "Curve Type"
+  ) +
+  scale_color_manual(values = c(
+    "ddC" = "#0072B2",  # Blue
+    "ddI" = "#D55E00"   # Vermilion
+  )) +
+  scale_linetype_manual(values = c(
+    "Kaplan-Meier"   = "solid",
+    "Parametric Fit" = "dashed"
+  )) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold")
+  )
+```
 
 ```{r}
 aids %>%
