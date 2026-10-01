@@ -198,17 +198,46 @@ $$
 &=\frac{1}{\sigma t\sqrt{2\pi}}e^{-w^2/2}=\left |\frac{dw}{dt}\right|f_W(w) = \frac{1}{\sigma t} f_W(w)
 \end{align}
 $$
-This means that  we have that $f_W(w)=\frac{1}{\sqrt{2\pi}}e^{-w^2/2}\implies w\sim N(0,1)$ therefore from $\ln(T) = \mu + \sigma w$ we can see that $\ln(T)\sim N(\mu,\sigma^2)$ meaning that $T\sim \text{Log-Normal}(\mu,\sigma^2)$
+This means that  we have that $f_W(w)=\frac{1}{\sqrt{2\pi}}e^{-w^2/2}\implies w\sim \mathcal{N}(0,1)$ therefore from $\ln(T) = \mu + \sigma w$ we can see that $\ln(T)\sim N(\mu,\sigma^2)$ meaning that $T\sim \text{Log-Normal}(\mu,\sigma^2)$
 
-There is one more model nested within the generalised-gamma framework, when we choose $Q=\sigma$ we get the following decomposition
+There is one more model nested within the generalised-gamma framework, when we choose $Q=\sigma$ we get the following decomposition, remembering that $w = (\ln(t) - \mu)/\sigma$ meaning that $\sigma w=\ln(t)-\mu$,
 
+$$
+\begin{align}
+f_T(t) &= \frac{|Q| (Q^{-2})^{Q^{-2}}}{\sigma t \, \Gamma(Q^{-2})} \exp\left[ Q^{-2} \left( Qw - \exp(Qw) \right) \right]\\
+&= \frac{|\sigma| (\sigma^{-2})^{\sigma^{-2}}}{\sigma t \, \Gamma(\sigma^{-2})} \exp\left[ \sigma^{-2} \left( \sigma w - \exp(\sigma w) \right) \right] \\
+&= \frac{|\sigma| (\sigma^{-2})^{\sigma^{-2}}}{\sigma t \, \Gamma(\sigma^{-2})} \exp\left[ \sigma^{-2} \left( \ln(t)-\mu - e^{\ln(t)-\mu} \right) \right] \\
+&= \frac{|\sigma| (\sigma^{-2})^{\sigma^{-2}}}{\sigma t \, \Gamma(\sigma^{-2})} \exp\left[\ln(t^{\sigma^{-2}})+ \sigma^{-2} \left(-\mu - te^{-\mu} \right) \right] \\
+&= \frac{|\sigma| (\sigma^{-2})^{\sigma^{-2}}}{\sigma  \, \Gamma(\sigma^{-2})} t^{\sigma^{-2}-1}e^{-\mu\sigma^{-2}- t\sigma^{-2} e^{-\mu}}
+\end{align}
+$$
+Use the following parametrisation,
+$$
+\alpha = \sigma^{-2}, \quad \beta = \sigma^{-2} e^{-\mu} \implies \frac{\beta}{\alpha}=e^{-\mu}
+$$
+Therefore,
+$$
+\begin{align}
+f_T(t) &=  \frac{|\alpha^{-1/2}| (\alpha)^\alpha} {\alpha^{-1/2}  \, \Gamma(\alpha)}t^{\alpha-1} \left(\frac{\beta}{\alpha}\right)^{\alpha} e^{- t\beta} \\
+&= \frac{(\alpha)^\alpha} {\Gamma(\alpha)} \left(\frac{\beta}{\alpha}\right)^{\alpha}t^{\alpha-1} e^{- t\beta}\\
+&= \frac{(\beta)^\alpha} {\Gamma(\alpha)} t^{\alpha-1} e^{- t\beta}
+\end{align}
+$$
+This means that $T\sim\text{Gamma}(\alpha,1/\beta)$.
 
 ```{r}
 generalised_gamma_ph <- flexsurvreg(Surv(Time, death) ~ drug + gender + CD4, 
                           data = aids.id, 
                           dist = "gengamma")
-tidy(generalised_gamma_ph)
+tidy(generalised_gamma_ph, conf.int = TRUE, conf.level = 0.95)
 ```
+
+By fitting a Generalised Gamma distribution we can observe the confidence intervals to infer which survival distribution fits best to the data.
+Observing the 95\% confidence intervals we fail to reject $H_0:Q=1\implies T\sim\text{Weibull}(1/\sigma,e^\mu)$ we also fail to reject (only just) $H_0:\sigma=1 \text{ & }Q=1\implies T\sim\text{Exp}(e^{-\mu})$.
+
+The data does seem to align with $Q=\sigma$ quite heavily as the values are highly similar $0.775$(3d.p.) vs $0.777$(3d.p.) with the confidence intervals overlapping a lot, therefore we fail to reject $H_0:Q=\sigma \implies T\sim\text{Gamma}(\sigma^{-2},\sigma^2e^\mu)$.
+
+We reject $H_0:Q=0$ as the 95\% c.e. for $Q$ is $(0.267,1.287)(3\text{d.p.})$ with predicted value $0.777(3\text{d.p.})$ which demonstrates that .
 
 ```{r}
 aids %>%
