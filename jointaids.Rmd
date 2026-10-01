@@ -237,7 +237,7 @@ Observing the 95\% confidence intervals we fail to reject $H_0:Q=1\implies T\sim
 
 The data does seem to align with $Q=\sigma$ quite heavily as the values are highly similar $0.775$(3d.p.) vs $0.777$(3d.p.) with the confidence intervals overlapping a lot, therefore we fail to reject $H_0:Q=\sigma \implies T\sim\text{Gamma}(\sigma^{-2},\sigma^2e^\mu)$.
 
-We reject $H_0:Q=0$ as the 95\% c.e. for $Q$ is $(0.267,1.287)(3\text{d.p.})$ with predicted value $0.777(3\text{d.p.})$ which demonstrates that .
+We reject $H_0:Q=0$ as the 95\% c.e. for $Q$ is $(0.267,1.287)(3\text{d.p.})$ with predicted value $0.777(3\text{d.p.})$ which demonstrates that.
 
 ```{r}
 aids %>%
